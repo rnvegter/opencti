@@ -1,0 +1,328 @@
+# OpenCTI Complete Container Stack
+# This compose file creates a full OpenCTI deployment with all required dependencies
+# 
+# Prerequisites:
+# - Docker and Docker Compose installed
+# - At least 8GB RAM available
+# - For Linux: run 'sudo sysctl -w vm.max_map_count=262144' for Elasticsearch
+#
+# Usage:
+# 1. Ensure .env file is in the same directory
+# 2. Run: docker compose up -d
+# 3. Access OpenCTI at http://localhost:8080 (or your configured URL)
+
+version: '3.8'
+
+services:
+  # ==========================================
+  # REDIS - In-memory cache and session store
+  # ==========================================
+  redis:
+    image: redis:${REDIS_VERSION}
+    container_name: opencti-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    # Redis configuration for persistence and logging
+    command: >
+      --save 20 1
+      --loglevel warning
+      --requirepass ${REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - opencti-network
+
+  # ==========================================
+  # ELASTICSEARCH - Search engine and data store
+  # ==========================================
+  elasticsearch:
+    image: docker.elastic.com/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    container_name: opencti-elasticsearch
+    restart: unless-stopped
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    environment:
+      # Cluster configuration
+      - cluster.name=opencti-cluster
+      - node.name=opencti-node
+      - discovery.type=single-node
+      # Memory settings (adjust based on available RAM)
+      - ES_JAVA_OPTS=${ELASTICSEARCH_JAVA_OPTS}
+      # Security settings (disabled for simplicity - enable in production)
+      - xpack.security.enabled=false
+      - xpack.ml.enabled=false
+      # Performance tuning
+      - bootstrap.memory_lock=true
+      - indices.query.bool.max_clause_count=2048
+    ulimits:
+      # Required for Elasticsearch
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - opencti-network
+
+  # ==========================================
+  # MINIO - S3-compatible object storage
+  # ==========================================
+  minio:
+    image: minio/minio:${MINIO_VERSION}
+    container_name: opencti-minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # Web Console
+    volumes:
+      - minio_data:/data
+    environment:
+      # MinIO credentials (used by OpenCTI for file storage)
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    # Start MinIO server with console on port 9001
+    command: server --console-address ":9001" /data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - opencti-network
+
+  # ==========================================
+  # RABBITMQ - Message broker for async tasks
+  # ==========================================
+  rabbitmq:
+    image: rabbitmq:${RABBITMQ_VERSION}
+    container_name: opencti-rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"   # AMQP port
+      - "15672:15672" # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    environment:
+      # RabbitMQ credentials and configuration
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_DEFAULT_VHOST}
+      # Enable management plugin
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: -rabbit log_levels [{connection,error},{default,info}]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - opencti-network
+
+  # ==========================================
+  # OPENCTI PLATFORM - Main application
+  # ==========================================
+  opencti:
+    image: opencti/platform:${OPENCTI_VERSION}
+    container_name: opencti-platform
+    restart: unless-stopped
+    ports:
+      - "${OPENCTI_PORT}:8080"
+    volumes:
+      - opencti_data:/opt/opencti/logs
+    environment:
+      # ===== Application Configuration =====
+      - NODE_OPTIONS=--max-old-space-size=8096
+      - APP__PORT=8080
+      - APP__BASE_URL=${OPENCTI_BASE_URL}
+      - APP__ADMIN__EMAIL=${OPENCTI_ADMIN_EMAIL}
+      - APP__ADMIN__PASSWORD=${OPENCTI_ADMIN_PASSWORD}
+      - APP__ADMIN__TOKEN=${OPENCTI_ADMIN_TOKEN}
+      
+      # ===== Logging Configuration =====
+      - APP__LOGS_LEVEL=${OPENCTI_LOG_LEVEL}
+      - REACT_APP__LOGS__LEVEL=${OPENCTI_LOG_LEVEL}
+      
+      # ===== Redis Configuration =====
+      - REDIS__HOSTNAME=redis
+      - REDIS__PORT=6379
+      - REDIS__PASSWORD=${REDIS_PASSWORD}
+      
+      # ===== Elasticsearch Configuration =====
+      - ELASTICSEARCH__URL=http://elasticsearch:9200
+      - ELASTICSEARCH__INDEX_PREFIX=opencti
+      
+      # ===== MinIO S3 Configuration =====
+      - MINIO__ENDPOINT=minio
+      - MINIO__PORT=9000
+      - MINIO__USE_SSL=false
+      - MINIO__ACCESS_KEY=${MINIO_ROOT_USER}
+      - MINIO__SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - MINIO__BUCKET_NAME=${MINIO_BUCKET_NAME}
+      - MINIO__BUCKET_REGION=${MINIO_BUCKET_REGION}
+      
+      # ===== RabbitMQ Configuration =====
+      - RABBITMQ__HOSTNAME=rabbitmq
+      - RABBITMQ__PORT=5672
+      - RABBITMQ__PORT_MANAGEMENT=15672
+      - RABBITMQ__MANAGEMENT_SSL=false
+      - RABBITMQ__USERNAME=${RABBITMQ_DEFAULT_USER}
+      - RABBITMQ__PASSWORD=${RABBITMQ_DEFAULT_PASS}
+      - RABBITMQ__QUEUE_TYPE=${RABBITMQ_QUEUE_TYPE}
+      
+      # ===== SMTP Configuration (optional) =====
+      - SMTP__HOSTNAME=${SMTP_HOSTNAME}
+      - SMTP__PORT=${SMTP_PORT}
+      - SMTP__USE_SSL=${SMTP_USE_SSL}
+      - SMTP__USERNAME=${SMTP_USERNAME}
+      - SMTP__PASSWORD=${SMTP_PASSWORD}
+      - SMTP__FROM_EMAIL=${SMTP_FROM_EMAIL}
+      
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    networks:
+      - opencti-network
+
+  # ==========================================
+  # OPENCTI WORKER - Background task processor
+  # ==========================================
+  worker:
+    image: opencti/worker:${OPENCTI_VERSION}
+    container_name: opencti-worker
+    restart: unless-stopped
+    volumes:
+      - worker_data:/opt/opencti-worker/logs
+    environment:
+      # Worker connects to OpenCTI platform
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      
+      # Worker configuration
+      - WORKER_LOG_LEVEL=${WORKER_LOG_LEVEL}
+      - WORKER_NAME=${WORKER_NAME}
+      
+      # Node.js memory configuration
+      - NODE_OPTIONS=--max-old-space-size=4096
+      
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-network
+
+  # ==========================================
+  # OPENCTI CONNECTOR - External data import
+  # ==========================================
+  connector-export-file-stix:
+    image: opencti/connector-export-file-stix:${OPENCTI_VERSION}
+    container_name: opencti-connector-export-file-stix
+    restart: unless-stopped
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_EXPORT_FILE_STIX_ID}
+      - CONNECTOR_TYPE=INTERNAL_EXPORT_FILE
+      - CONNECTOR_NAME=ExportFileStix2
+      - CONNECTOR_SCOPE=application/json
+      - CONNECTOR_AUTO=true
+      - CONNECTOR_CONFIDENCE_LEVEL=15
+      - CONNECTOR_LOG_LEVEL=${CONNECTOR_LOG_LEVEL}
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-network
+
+  connector-export-file-csv:
+    image: opencti/connector-export-file-csv:${OPENCTI_VERSION}
+    container_name: opencti-connector-export-file-csv
+    restart: unless-stopped
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_EXPORT_FILE_CSV_ID}
+      - CONNECTOR_TYPE=INTERNAL_EXPORT_FILE
+      - CONNECTOR_NAME=ExportFileCsv
+      - CONNECTOR_SCOPE=text/csv
+      - CONNECTOR_AUTO=true
+      - CONNECTOR_CONFIDENCE_LEVEL=15
+      - CONNECTOR_LOG_LEVEL=${CONNECTOR_LOG_LEVEL}
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-network
+
+  connector-import-file-stix:
+    image: opencti/connector-import-file-stix:${OPENCTI_VERSION}
+    container_name: opencti-connector-import-file-stix
+    restart: unless-stopped
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_IMPORT_FILE_STIX_ID}
+      - CONNECTOR_TYPE=INTERNAL_IMPORT_FILE
+      - CONNECTOR_NAME=ImportFileStix
+      - CONNECTOR_VALIDATE_BEFORE_IMPORT=true
+      - CONNECTOR_SCOPE=application/json,text/xml
+      - CONNECTOR_AUTO=true
+      - CONNECTOR_CONFIDENCE_LEVEL=15
+      - CONNECTOR_LOG_LEVEL=${CONNECTOR_LOG_LEVEL}
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-network
+
+# ==========================================
+# VOLUMES - Persistent data storage
+# ==========================================
+volumes:
+  redis_data:
+    driver: local
+  elasticsearch_data:
+    driver: local
+  minio_data:
+    driver: local
+  rabbitmq_data:
+    driver: local
+  opencti_data:
+    driver: local
+  worker_data:
+    driver: local
+
+# ==========================================
+# NETWORKS - Container communication
+# ==========================================
+networks:
+  opencti-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
