@@ -1,0 +1,29 @@
+Usage Instructions
+Save the files: Place both docker-compose.yml and .env in the same directory.
+
+Customize the environment: Edit the .env file to change default passwords and configure settings for your environment.
+
+System requirements: Ensure your system has:
+
+At least 8GB RAM
+20GB+ free disk space
+Docker and Docker Compose installed
+Linux-specific setup (if applicable):
+
+## memory  fix
+sudo sysctl -w vm.max_map_count=262144
+
+## start container
+docker compose up -d
+
+## view logs
+docker compose logs -f opencti
+Access OpenCTI: Navigate to http://localhost:8080 (or your configured URL) and log in with the admin credentials from your .env file.
+
+Verify services: Check that all services are healthy:
+
+bash
+
+Copy
+docker compose ps
+The stack includes comprehensive health checks and proper service dependencies to ensure reliable startup and operation.
